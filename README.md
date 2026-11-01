@@ -197,6 +197,9 @@ mutating domain state. The Engine remains the sole writer.
   details, worker monitor, event timeline, failure inspector, and LLM
   observability. Reads via `fetch`, never writes.
 
+> Follow-up: the dashboard has no type-check step yet (`vite build` transpiles
+> TS without `vue-tsc`). Adding `vue-tsc` type-checking is intentionally deferred.
+
 ```sh
 pnpm dev:api         # read-only API on :8787 (ORCHESTRA_DB / PORT env)
 pnpm dev:dashboard   # Vite dev server (proxies /api)
