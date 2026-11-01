@@ -83,6 +83,8 @@ function assignment(overrides: Partial<Assignment> = {}): Assignment {
     createdAt: 1_700_000_000_000,
     startedAt: null,
     endedAt: null,
+    heartbeatAt: null,
+    progressAt: null,
     report: null,
     artifacts: [],
     ...overrides,

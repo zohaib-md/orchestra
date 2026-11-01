@@ -24,6 +24,8 @@ export type ReceiveResult = "stored" | "duplicate";
 export interface EngineOptions {
   policy: () => Policy;
   assessor?: Assessor;
+  /** Replacement assignments allowed after the first attempt, per ticket. */
+  maxRetries?: number;
   now?: () => number;
 }
 
@@ -35,6 +37,7 @@ export interface EngineOptions {
 export class Engine {
   private readonly policy: () => Policy;
   private readonly assessor: Assessor;
+  private readonly maxRetries: number;
   private readonly now: () => number;
 
   constructor(
@@ -43,6 +46,7 @@ export class Engine {
   ) {
     this.policy = options.policy;
     this.assessor = options.assessor ?? new DeterministicAssessor();
+    this.maxRetries = options.maxRetries ?? 0;
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -245,6 +249,8 @@ export class Engine {
       createdAt: this.now(),
       startedAt: null,
       endedAt: null,
+      heartbeatAt: null,
+      progressAt: null,
       report: null,
       artifacts: [],
     };
@@ -285,11 +291,116 @@ export class Engine {
     return this.repos.assignments.list("pending");
   }
 
+  runningAssignments(): Assignment[] {
+    return this.repos.assignments.list("running");
+  }
+
+  completedAssignments(): Assignment[] {
+    return this.repos.assignments.list("completed");
+  }
+
   claim(assignmentId: AssignmentId): Assignment | undefined {
     return this.repos.assignments.claim(assignmentId, this.now());
   }
 
-  report(assignmentId: AssignmentId, report: Report, artifacts: string[] = []): void {
+  /** Worker liveness signal. No-op unless the assignment is running. */
+  heartbeat(assignmentId: AssignmentId): void {
+    this.repos.atomic(() => {
+      const assignment = this.repos.assignments.get(assignmentId);
+      if (assignment === undefined || assignment.state !== "running") return;
+      assignment.heartbeatAt = this.now();
+      this.repos.assignments.save(assignment);
+    });
+  }
+
+  /** Worker progress signal. No-op unless the assignment is running. */
+  progress(assignmentId: AssignmentId): void {
+    this.repos.atomic(() => {
+      const assignment = this.repos.assignments.get(assignmentId);
+      if (assignment === undefined || assignment.state !== "running") return;
+      assignment.progressAt = this.now();
+      this.repos.assignments.save(assignment);
+    });
+  }
+
+  /** Persist a worker's result durably: running -> completed. */
+  complete(
+    assignmentId: AssignmentId,
+    report: Report,
+    artifacts: string[] = [],
+  ): void {
+    this.repos.atomic(() => {
+      const assignment = this.repos.assignments.get(assignmentId);
+      if (assignment === undefined) throw new UserError(USER_ERRORS.missing);
+      if (assignment.state !== "running") {
+        throw new UserError(USER_ERRORS.invalid, { state: assignment.state });
+      }
+      const updated: Assignment = {
+        ...assignment,
+        state: "completed",
+        report,
+        artifacts,
+      };
+      this.repos.assignments.save(updated);
+    });
+  }
+
+  /** Finalize a completed assignment: completed -> ended. Idempotent. */
+  deliver(assignmentId: AssignmentId): void {
+    this.repos.atomic(() => {
+      const assignment = this.repos.assignments.get(assignmentId);
+      if (assignment === undefined) throw new UserError(USER_ERRORS.missing);
+      if (assignment.state !== "completed") return;
+      const updated: Assignment = {
+        ...assignment,
+        state: "ended",
+        endedAt: this.now(),
+      };
+      this.repos.assignments.save(updated);
+      this.endTicketIfDropped(assignment.ticketId, assignment.report);
+    });
+  }
+
+  /**
+   * Retry delivery of stranded `completed` assignments without re-executing
+   * the work. Returns the number delivered.
+   */
+  deliverCompleted(): number {
+    return this.repos.atomic(() => {
+      let delivered = 0;
+      for (const assignment of this.repos.assignments.list("completed")) {
+        const updated: Assignment = {
+          ...assignment,
+          state: "ended",
+          endedAt: this.now(),
+        };
+        this.repos.assignments.save(updated);
+        this.endTicketIfDropped(assignment.ticketId, assignment.report);
+        delivered++;
+      }
+      return delivered;
+    });
+  }
+
+  /** Pause a running assignment awaiting external input: running -> waiting. */
+  wait(assignmentId: AssignmentId, report: Report): void {
+    this.repos.atomic(() => {
+      const assignment = this.repos.assignments.get(assignmentId);
+      if (assignment === undefined) throw new UserError(USER_ERRORS.missing);
+      if (assignment.state !== "running") {
+        throw new UserError(USER_ERRORS.invalid, { state: assignment.state });
+      }
+      const updated: Assignment = {
+        ...assignment,
+        state: "waiting",
+        report,
+      };
+      this.repos.assignments.save(updated);
+    });
+  }
+
+  /** Record a failed execution: running -> ended. The Ticket stays open. */
+  fail(assignmentId: AssignmentId, report: Report): void {
     this.repos.atomic(() => {
       const assignment = this.repos.assignments.get(assignmentId);
       if (assignment === undefined) throw new UserError(USER_ERRORS.missing);
@@ -301,30 +412,33 @@ export class Engine {
         state: "ended",
         endedAt: this.now(),
         report,
-        artifacts,
       };
       this.repos.assignments.save(updated);
-
-      if (report.status === "dropped") {
-        const ticket = this.repos.tickets.get(assignment.ticketId);
-        if (ticket !== undefined && ticket.state === "open") {
-          ticket.state = "ended";
-          ticket.end = {
-            at: this.now(),
-            by: "executor",
-            outcome: "dropped",
-            reason: report.text,
-          };
-          this.repos.tickets.save(ticket);
-        }
-      }
     });
   }
 
+  private endTicketIfDropped(ticketId: TicketId, report: Report | null): void {
+    if (report?.status !== "dropped") return;
+    const ticket = this.repos.tickets.get(ticketId);
+    if (ticket !== undefined && ticket.state === "open") {
+      ticket.state = "ended";
+      ticket.end = {
+        at: this.now(),
+        by: "executor",
+        outcome: "dropped",
+        reason: report.text,
+      };
+      this.repos.tickets.save(ticket);
+    }
+  }
+
+  /** Create a replacement Assignment for an open Ticket, respecting maxRetries. */
   replaceAssignment(ticketId: TicketId): Assignment | undefined {
     return this.repos.atomic(() => {
       const ticket = this.repos.tickets.get(ticketId);
       if (ticket === undefined || ticket.state !== "open") return undefined;
+      const attempts = this.repos.assignments.listByTicket(ticketId).length;
+      if (attempts > this.maxRetries) return undefined;
       return this.createAssignment(ticketId);
     });
   }

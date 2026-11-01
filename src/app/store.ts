@@ -121,6 +121,11 @@ const MIGRATIONS: string[] = [
   `,
   // v3: artifact references on assignments
   `ALTER TABLE assignments ADD COLUMN artifacts TEXT NOT NULL DEFAULT '[]';`,
+  // v4: heartbeat + progress tracking for the Watchdog
+  `
+  ALTER TABLE assignments ADD COLUMN heartbeat_at INTEGER;
+  ALTER TABLE assignments ADD COLUMN progress_at INTEGER;
+  `,
 ];
 
 export class Store implements Repositories {
@@ -456,6 +461,10 @@ export class Store implements Repositories {
       startedAt:
         row["started_at"] === null ? null : Number(row["started_at"]),
       endedAt: row["ended_at"] === null ? null : Number(row["ended_at"]),
+      heartbeatAt:
+        row["heartbeat_at"] === null ? null : Number(row["heartbeat_at"]),
+      progressAt:
+        row["progress_at"] === null ? null : Number(row["progress_at"]),
       report:
         row["report_status"] === null
           ? null
@@ -475,8 +484,9 @@ export class Store implements Repositories {
         db.prepare(
           `INSERT INTO assignments
              (id, ticket_id, worker_id, state, created_at, started_at, ended_at,
+              heartbeat_at, progress_at,
               report_status, report_text, report_question, report_at, artifacts)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              ticket_id = excluded.ticket_id,
              worker_id = excluded.worker_id,
@@ -484,6 +494,8 @@ export class Store implements Repositories {
              created_at = excluded.created_at,
              started_at = excluded.started_at,
              ended_at = excluded.ended_at,
+             heartbeat_at = excluded.heartbeat_at,
+             progress_at = excluded.progress_at,
              report_status = excluded.report_status,
              report_text = excluded.report_text,
              report_question = excluded.report_question,
@@ -497,6 +509,8 @@ export class Store implements Repositories {
           assignment.createdAt,
           assignment.startedAt,
           assignment.endedAt,
+          assignment.heartbeatAt,
+          assignment.progressAt,
           report?.status ?? null,
           report?.text ?? null,
           report?.question ?? null,
@@ -529,10 +543,11 @@ export class Store implements Repositories {
       claim(id, startedAt) {
         const result = db
           .prepare(
-            `UPDATE assignments SET state = 'running', started_at = ?
+            `UPDATE assignments
+             SET state = 'running', started_at = ?, heartbeat_at = ?, progress_at = ?
              WHERE id = ? AND state = 'pending'`,
           )
-          .run(startedAt, id);
+          .run(startedAt, startedAt, startedAt, id);
         if (Number(result.changes) !== 1) return undefined;
         const row = db
           .prepare("SELECT * FROM assignments WHERE id = ?")

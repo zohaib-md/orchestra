@@ -1,4 +1,12 @@
-import type { Assignment, Report, Ticket } from "../core/model";
+import type { Assignment, Report, Ticket } from "../core/model.ts";
+
+/** Cooperative signals a Worker emits during execution. */
+export interface WorkerSignals {
+  /** Signal liveness (the worker is still alive). */
+  heartbeat(): void;
+  /** Signal meaningful progress (the worker advanced its work). */
+  progress(): void;
+}
 
 export interface WorkerContext {
   ticket: Ticket;
@@ -7,6 +15,7 @@ export interface WorkerContext {
   workDir: string;
   /** Canonical inputs derived from the ticket's origin triggers. */
   inputs: string[];
+  signals: WorkerSignals;
 }
 
 export interface WorkerResult {

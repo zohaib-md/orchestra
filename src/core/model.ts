@@ -103,7 +103,7 @@ export interface Ticket {
   end: TicketEnd | null;
 }
 
-export type AssignmentState = "pending" | "running" | "ended";
+export type AssignmentState = "pending" | "running" | "waiting" | "completed" | "ended";
 export type ReportStatus =
   | "progress"
   | "waiting"
@@ -130,6 +130,10 @@ export interface Assignment {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
+  /** Last liveness signal from the worker (distinct from progress). */
+  heartbeatAt: number | null;
+  /** Last meaningful progress signal from the worker. */
+  progressAt: number | null;
   report: Report | null;
   /** References to generated artifacts, not the artifacts themselves. */
   artifacts: string[];

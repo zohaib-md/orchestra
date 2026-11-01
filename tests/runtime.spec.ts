@@ -21,9 +21,9 @@ function tempStorePath(): string {
   return path.join(dir, "state.db");
 }
 
-function setup(path = ":memory:") {
+function setup(path = ":memory:", maxRetries = 0) {
   const store = new Store(path);
-  const engine = new Engine(store, { policy: () => makePolicy() });
+  const engine = new Engine(store, { policy: () => makePolicy(), maxRetries });
   return { store, engine };
 }
 
@@ -43,7 +43,7 @@ const successWorker: Worker = { async run() { return okResult(); } };
 
 describe("worker runtime", () => {
   it("runs the full definition-of-done demonstration", async () => {
-    const { store, engine } = setup();
+    const { store, engine } = setup(":memory:", 1);
     seed(engine, 3);
 
     // 1. three authorized tickets with pending dispatch intents
@@ -68,7 +68,6 @@ describe("worker runtime", () => {
       worker: flakyWorker,
       maxWorkers: 2,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 1,
     });
 
     const summary = await runtime.runAll();
@@ -108,7 +107,6 @@ describe("worker runtime", () => {
       worker: trackingWorker,
       maxWorkers: 2,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     await runtime.runAll();
 
@@ -124,7 +122,6 @@ describe("worker runtime", () => {
       worker: successWorker,
       maxWorkers: 1,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     const summary = await runtime.runAll();
     expect(summary.completed).toBe(3);
@@ -145,7 +142,6 @@ describe("worker runtime", () => {
       worker,
       maxWorkers: 2,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     await runtime.runAll();
     expect(sideEffects).toBe(2);
@@ -155,7 +151,6 @@ describe("worker runtime", () => {
       worker,
       maxWorkers: 2,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     await second.runAll();
     expect(sideEffects).toBe(2);
@@ -175,7 +170,7 @@ describe("worker runtime", () => {
   });
 
   it("records a failed assignment and creates a replacement (retry policy)", async () => {
-    const { store, engine } = setup();
+    const { store, engine } = setup(":memory:", 1);
     seed(engine, 1);
     const ticketId = store.tickets.list()[0]!.id;
 
@@ -183,7 +178,6 @@ describe("worker runtime", () => {
       worker: { async run() { throw new Error("boom"); } },
       maxWorkers: 1,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 1,
     });
     const summary = await runtime.runAll();
 
@@ -204,7 +198,6 @@ describe("worker runtime", () => {
       worker: { async run() { throw new Error("boom"); } },
       maxWorkers: 1,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     await runtime.runAll();
     expect(store.assignments.listByTicket(ticketId)).toHaveLength(1);
@@ -221,7 +214,6 @@ describe("persistence and restart", () => {
       worker: successWorker,
       maxWorkers: 2,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     await runtime.runAll();
     first.store.close();
@@ -255,7 +247,6 @@ describe("persistence and restart", () => {
       worker: hangingWorker,
       maxWorkers: 1,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
     firstRuntime.runAll(); // not awaited: claims, then hangs
 
@@ -270,9 +261,8 @@ describe("persistence and restart", () => {
       worker: successWorker,
       maxWorkers: 1,
       workRoot: "/tmp/orchestra-work",
-      maxRetries: 0,
     });
-    const recovered = secondRuntime.start();
+    const { recovered } = secondRuntime.start();
     expect(recovered).toBe(1);
 
     await secondRuntime.runAll();

@@ -42,8 +42,9 @@ src/
     store.ts    SQLite implementation of Repositories (node:sqlite)
   sources/    Adapters (event streams) → Triggers  [not yet built]
   executor/
-    worker.ts   Worker interface (pluggable execution mechanism)
+    worker.ts   Worker interface + WorkerSignals (pluggable execution mechanism)
     runtime.ts  WorkerRuntime (dispatch, concurrency, retry, recovery)
+    watchdog.ts Watchdog (heartbeat/progress/deadline stall detection)
   client/     Vue dashboard (imports types only)  [not yet built]
 tests/
 ```
@@ -81,7 +82,7 @@ tests/
 | V0.2 Tickets & Assignments (dispatch intents) | Done |
 | V0.3 Concurrent isolated Workers + retry/recovery | Done |
 | V0.4 SQLite persistence & migration | Done |
-| V0.5 Watchdog (stall detection) | Not started |
+| V0.5 Watchdog (heartbeat/progress/deadline) | Done |
 | V0.6 LLM-powered evaluation & execution | Not started |
 | V0.7 Vue monitoring dashboard | Not started |
 
@@ -97,8 +98,43 @@ TriggerInput ──receive──▶ Trigger (deduped) ──fan-out──▶ sub
                         Ticket + Mandate + pending Assignment (dispatch intent)
                               │
                               ▼
-                 WorkerRuntime: claim ─▶ run Worker ─▶ report (retry on failure)
+                 WorkerRuntime: claim ─▶ run Worker ─▶ complete ─▶ deliver
+                              │
+                              ▼
+                 Watchdog: tick() recovers running assignments that are
+                 crashed / stalled / past deadline
 ```
+
+### Assignment lifecycle & recovery
+
+```
+pending ──claim──▶ running ──complete──▶ completed ──deliver──▶ ended
+                      │                                      (ready/dropped)
+                      ├──wait──▶ waiting     (awaiting external input)
+                      └──fail──▶ ended       (crash / stall / deadline / interrupted)
+```
+
+- **Heartbeat (`heartbeatAt`)** records liveness; **progress (`progressAt`)**
+  records meaningful work. Both are set to `startedAt` on claim.
+- The **Watchdog** scans only `running` assignments and classifies, first match
+  wins: deadline exceeded → no heartbeat (crashed) → no progress (stalled).
+  `heartbeatTimeout > progressTimeout` is what separates a live-but-stuck worker
+  from a crashed one.
+- **`waiting` and `completed` assignments are never recovered.** A `waiting`
+  assignment is blocked on external input (resume is a later milestone); a
+  `completed` assignment has its result persisted and only needs delivery.
+- **`complete` persists the result durably, then `deliver` finalizes.** If the
+  process dies between them, `deliverCompleted()` retries delivery without
+  re-executing the work.
+- **Restart** (`WorkerRuntime.start`) runs `recoverInterrupted()` (running →
+  failed "host interrupted" + replacement) and `deliverCompleted()`.
+
+### Assumptions
+
+- Single process; the Watchdog runs in-process and only detects crashed workers
+  on restart (there is no cross-process heartbeat consumer yet).
+- Workers are expected to emit heartbeats/progress cooperatively. A worker that
+  never heartbeats is indistinguishable from a crashed one after the timeout.
 
 ### Race conditions & known limitations
 
@@ -108,8 +144,8 @@ would need strengthening for multi-process deployment:
 - **Eval queue**: `evaluateDue` reads pending threads, then `takeThread`s each
   in its own transaction. Two processes could take the same batch. A per-thread
   claim (like the assignment `claim` guard) would close this.
-- **Recovery**: `recoverInterrupted` marks `running` assignments interrupted and
-  creates replacements; two simultaneously-restarting processes could double
+- **Recovery**: `recoverInterrupted` and the Watchdog mark `running` assignments
+  and create replacements; two simultaneously-restarting processes could double
   that work. Needs a startup lock or a guarded transition.
 - **Assignment claim** *is* guarded at the database level (conditional
   `UPDATE ... WHERE state = 'pending'`), so duplicate dispatch is already safe.

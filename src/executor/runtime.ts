@@ -1,7 +1,7 @@
 import path from "node:path";
-import type { Engine } from "../core/engine";
-import type { Assignment, Report } from "../core/model";
-import type { Worker, WorkerContext, WorkerResult } from "./worker";
+import type { Engine } from "../core/engine.ts";
+import type { Assignment, Report } from "../core/model.ts";
+import type { Worker, WorkerContext, WorkerResult, WorkerSignals } from "./worker.ts";
 
 export interface WorkerRuntimeOptions {
   worker: Worker;
@@ -9,8 +9,6 @@ export interface WorkerRuntimeOptions {
   maxWorkers: number;
   /** Root directory for per-ticket working directories. */
   workRoot: string;
-  /** Replacement assignments allowed after the first attempt, per ticket. */
-  maxRetries: number;
   now?: () => number;
 }
 
@@ -30,7 +28,6 @@ export class WorkerRuntime {
   private readonly worker: Worker;
   private readonly maxWorkers: number;
   private readonly workRoot: string;
-  private readonly maxRetries: number;
   private readonly now: () => number;
   private active = 0;
   private stopped = false;
@@ -42,13 +39,15 @@ export class WorkerRuntime {
     this.worker = options.worker;
     this.maxWorkers = options.maxWorkers;
     this.workRoot = options.workRoot;
-    this.maxRetries = options.maxRetries;
     this.now = options.now ?? (() => Date.now());
   }
 
-  /** Recover assignments left in `running` by a previous, dead process. */
-  start(): number {
-    return this.engine.recoverInterrupted();
+  /** Recover interrupted executions and deliver stranded results. */
+  start(): { recovered: number; delivered: number } {
+    return {
+      recovered: this.engine.recoverInterrupted(),
+      delivered: this.engine.deliverCompleted(),
+    };
   }
 
   stop(): void {
@@ -88,23 +87,30 @@ export class WorkerRuntime {
     assignment: Assignment,
   ): Promise<{ status: "completed" | "failed"; replaced: boolean }> {
     try {
-      const result = await this.runWorker(assignment);
-      this.engine.report(assignment.id, result.report, result.artifacts);
-      return { status: "completed", replaced: false };
-    } catch (err) {
-      const report: Report = {
-        status: "failed",
-        text: err instanceof Error ? err.message : String(err),
-        question: null,
-        at: this.now(),
-      };
-      this.engine.report(assignment.id, report);
-      const attempts = this.engine.assignmentCount(assignment.ticketId);
-      if (attempts <= this.maxRetries) {
-        this.engine.replaceAssignment(assignment.ticketId);
-        return { status: "failed", replaced: true };
+      let result: WorkerResult;
+      try {
+        result = await this.runWorker(assignment);
+      } catch (err) {
+        // Worker crashed. Re-execution is safe: the work never completed.
+        this.engine.fail(assignment.id, {
+          status: "failed",
+          text: err instanceof Error ? err.message : String(err),
+          question: null,
+          at: this.now(),
+        });
+        const replacement = this.engine.replaceAssignment(assignment.ticketId);
+        return { status: "failed", replaced: replacement !== undefined };
       }
-      return { status: "failed", replaced: false };
+
+      const report = result.report;
+      if (report.status === "waiting" || report.status === "blocked") {
+        this.engine.wait(assignment.id, report);
+        return { status: "completed", replaced: false };
+      }
+      // Persist the result durably before finalizing.
+      this.engine.complete(assignment.id, report, result.artifacts);
+      this.engine.deliver(assignment.id);
+      return { status: "completed", replaced: false };
     } finally {
       this.active--;
     }
@@ -118,11 +124,16 @@ export class WorkerRuntime {
     const inputs = ticket.origin.triggerIds
       .map((id) => this.engine.getTrigger(id)?.payload)
       .filter((payload): payload is string => payload !== undefined);
+    const signals: WorkerSignals = {
+      heartbeat: () => this.engine.heartbeat(assignment.id),
+      progress: () => this.engine.progress(assignment.id),
+    };
     const ctx: WorkerContext = {
       ticket,
       assignment,
       workDir: path.join(this.workRoot, ticket.id),
       inputs,
+      signals,
     };
     return this.worker.run(ctx);
   }
