@@ -6,7 +6,10 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:api": "tsx watch src/index.ts",
+    "dev:dashboard": "pnpm --dir dashboard dev",
     "build": "tsc -p tsconfig.json",
+    "build:dashboard": "pnpm --dir dashboard build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

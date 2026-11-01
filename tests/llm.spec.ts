@@ -3,7 +3,7 @@ import { Store } from "../src/app/store.ts";
 import { Engine } from "../src/core/engine.ts";
 import { LlmAssessor } from "../src/llm/assessor.ts";
 import { LlmWorker } from "../src/llm/worker.ts";
-import type { ModelClient } from "../src/llm/model.ts";
+import type { ModelClient, CompletionResult } from "../src/llm/model.ts";
 import { WorkerRuntime } from "../src/executor/runtime.ts";
 import type { WorkerContext } from "../src/executor/worker.ts";
 import type { AssessmentInput } from "../src/core/assessor.ts";
@@ -18,12 +18,12 @@ class FakeModelClient implements ModelClient {
     this.queue.push(...responses);
   }
 
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string): Promise<CompletionResult> {
     this.prompts.push(prompt);
     const next = this.queue.shift();
     if (next === undefined) throw new Error("unexpected model call");
     if (next instanceof Error) throw next;
-    return next;
+    return { text: next, usage: null };
   }
 }
 

@@ -4,6 +4,7 @@ export type ThreadId = string;
 export type TicketId = string;
 export type AssignmentId = string;
 export type DecisionId = string;
+export type EventId = number;
 
 export type SourceState = "running" | "paused" | "disabled";
 
@@ -138,3 +139,21 @@ export interface Assignment {
   /** References to generated artifacts, not the artifacts themselves. */
   artifacts: string[];
 }
+
+/**
+ * An append-only record of a meaningful state transition, written only by the
+ * Engine (and the LLM adapters, which report model calls). The dashboard reads
+ * these; it never writes them.
+ */
+export interface EventRecord {
+  id: EventId;
+  at: number;
+  kind: string;
+  ticketId: TicketId | null;
+  assignmentId: AssignmentId | null;
+  triggerId: TriggerId | null;
+  threadId: ThreadId | null;
+  data: Record<string, unknown>;
+}
+
+export type EventInput = Omit<EventRecord, "id">;

@@ -1,5 +1,13 @@
 import type { Assessor, Assessment, AssessmentInput } from "../core/assessor.ts";
-import type { ModelClient } from "./model.ts";
+import type { EventSink } from "../core/ports.ts";
+import type { CompletionResult, ModelClient, TokenUsage } from "./model.ts";
+
+export interface LlmAssessorOptions {
+  /** Label for observability; defaults to "llm". */
+  model?: string;
+  /** Optional event sink for `llm.call` observability records. */
+  events?: EventSink;
+}
 
 function buildPrompt(input: AssessmentInput): string {
   const rules = input.policy.rules
@@ -60,15 +68,53 @@ function parseAssessment(raw: string, input: AssessmentInput): Assessment {
  * before the assessor is invoked.
  */
 export class LlmAssessor implements Assessor {
-  constructor(private readonly client: ModelClient) {}
+  private readonly model: string;
+  private readonly events: EventSink | undefined;
+
+  constructor(
+    private readonly client: ModelClient,
+    options: LlmAssessorOptions = {},
+  ) {
+    this.model = options.model ?? "llm";
+    this.events = options.events;
+  }
 
   async assess(input: AssessmentInput): Promise<Assessment> {
-    let raw: string;
+    const started = Date.now();
+    let result: CompletionResult;
     try {
-      raw = await this.client.complete(buildPrompt(input));
-    } catch {
+      result = await this.client.complete(buildPrompt(input));
+    } catch (err) {
+      this.record(started, false, null, err);
       return { outcome: "unavailable", ruleId: null, scope: "", reasonCode: "model_error" };
     }
-    return parseAssessment(raw, input);
+    this.record(started, true, result.usage, null);
+    return parseAssessment(result.text, input);
+  }
+
+  private record(
+    started: number,
+    ok: boolean,
+    usage: TokenUsage | null,
+    error: unknown,
+  ): void {
+    if (this.events === undefined) return;
+    const data: Record<string, unknown> = {
+      model: this.model,
+      role: "assessor",
+      latencyMs: Date.now() - started,
+      ok,
+    };
+    if (usage !== null) data["usage"] = { ...usage };
+    if (error !== null) data["error"] = error instanceof Error ? error.message : String(error);
+    this.events.append({
+      at: Date.now(),
+      kind: "llm.call",
+      ticketId: null,
+      assignmentId: null,
+      triggerId: null,
+      threadId: null,
+      data,
+    });
   }
 }

@@ -53,6 +53,28 @@ export class Engine {
     this.now = options.now ?? (() => Date.now());
   }
 
+  /** Append an observability event (append-only; read by the dashboard). */
+  private emit(
+    kind: string,
+    refs: {
+      ticketId?: TicketId;
+      assignmentId?: AssignmentId;
+      triggerId?: TriggerId;
+      threadId?: ThreadId;
+    },
+    data: Record<string, unknown> = {},
+  ): void {
+    this.repos.events.append({
+      at: this.now(),
+      kind,
+      ticketId: refs.ticketId ?? null,
+      assignmentId: refs.assignmentId ?? null,
+      triggerId: refs.triggerId ?? null,
+      threadId: refs.threadId ?? null,
+      data,
+    });
+  }
+
   // ------------------------------------------------------------------ Intake
 
   /** Ingest a normalized event. Idempotent: a duplicate delivery returns "duplicate". */
@@ -91,6 +113,11 @@ export class Engine {
         disposition: null,
       };
       this.repos.triggers.save(trigger);
+      this.emit(
+        "trigger.received",
+        { triggerId: id, threadId: primaryThreadId },
+        { actor: input.actor, kind: input.kind, externalId: input.externalId },
+      );
 
       // Subscription-aware routing: fan out to open tickets on these threads.
       const subscribed = this.repos.subscriptions.openTicketIdsFor(threadIds);
@@ -159,11 +186,13 @@ export class Engine {
     let outcome: Decision["outcome"];
     let assessment: Assessment | undefined;
     let reasons: Decision["reasons"];
+    let assessorLatencyMs = 0;
 
     if (primary === undefined || admitted === undefined) {
       outcome = "ignore";
       reasons = [{ code: "not_admitted", values: {} }];
     } else {
+      const started = this.now();
       try {
         assessment = await this.assessor.assess({
           trigger: primary,
@@ -183,6 +212,7 @@ export class Engine {
           reasonCode: "assessor_error",
         };
       }
+      assessorLatencyMs = this.now() - started;
       outcome = assessment.outcome;
       reasons = [{ code: assessment.reasonCode, values: {} }];
     }
@@ -199,6 +229,17 @@ export class Engine {
         decidedBy: "router",
       };
       this.repos.decisions.save(decision);
+      this.emit(
+        "decision.recorded",
+        { threadId },
+        {
+          outcome,
+          strength: decision.strength,
+          reasonCode: reasons[0]?.code ?? null,
+          latencyMs: assessorLatencyMs,
+          triggerIds: batchIds,
+        },
+      );
 
       for (const trigger of triggers) {
         trigger.disposition = {
@@ -253,6 +294,15 @@ export class Engine {
       end: null,
     };
     this.repos.tickets.save(ticket);
+    this.emit(
+      "ticket.created",
+      { ticketId, triggerId: primary.id },
+      {
+        scope: assessment.scope,
+        requester: primary.actor,
+        strength: admitted.strength,
+      },
+    );
 
     // Subscribe the ticket to every thread in the batch.
     const threadIds = new Set<ThreadId>(primary.threadIds);
@@ -297,6 +347,7 @@ export class Engine {
       ticket.state = "ended";
       ticket.end = { at: this.now(), by: "person", outcome: "closed", reason: reason ?? null };
       this.repos.tickets.save(ticket);
+      this.emit("ticket.ended", { ticketId }, { outcome: "closed", reason: reason ?? null });
     });
   }
 
@@ -329,7 +380,16 @@ export class Engine {
   }
 
   claim(assignmentId: AssignmentId): Assignment | undefined {
-    return this.repos.assignments.claim(assignmentId, this.now());
+    return this.repos.atomic(() => {
+      const claimed = this.repos.assignments.claim(assignmentId, this.now());
+      if (claimed !== undefined) {
+        this.emit("assignment.claimed", {
+          assignmentId,
+          ticketId: claimed.ticketId,
+        });
+      }
+      return claimed;
+    });
   }
 
   /** Worker liveness signal. No-op unless the assignment is running. */
@@ -339,6 +399,10 @@ export class Engine {
       if (assignment === undefined || assignment.state !== "running") return;
       assignment.heartbeatAt = this.now();
       this.repos.assignments.save(assignment);
+      this.emit("assignment.heartbeat", {
+        assignmentId,
+        ticketId: assignment.ticketId,
+      });
     });
   }
 
@@ -349,6 +413,10 @@ export class Engine {
       if (assignment === undefined || assignment.state !== "running") return;
       assignment.progressAt = this.now();
       this.repos.assignments.save(assignment);
+      this.emit("assignment.progress", {
+        assignmentId,
+        ticketId: assignment.ticketId,
+      });
     });
   }
 
@@ -371,6 +439,11 @@ export class Engine {
         artifacts,
       };
       this.repos.assignments.save(updated);
+      this.emit(
+        "assignment.completed",
+        { assignmentId, ticketId: assignment.ticketId },
+        { status: report.status },
+      );
     });
   }
 
@@ -387,6 +460,10 @@ export class Engine {
       };
       this.repos.assignments.save(updated);
       this.endTicketIfDropped(assignment.ticketId, assignment.report);
+      this.emit("assignment.delivered", {
+        assignmentId,
+        ticketId: assignment.ticketId,
+      });
     });
   }
 
@@ -405,6 +482,10 @@ export class Engine {
         };
         this.repos.assignments.save(updated);
         this.endTicketIfDropped(assignment.ticketId, assignment.report);
+        this.emit("assignment.delivered", {
+          assignmentId: assignment.id,
+          ticketId: assignment.ticketId,
+        });
         delivered++;
       }
       return delivered;
@@ -425,6 +506,11 @@ export class Engine {
         report,
       };
       this.repos.assignments.save(updated);
+      this.emit(
+        "assignment.waiting",
+        { assignmentId, ticketId: assignment.ticketId },
+        { status: report.status },
+      );
     });
   }
 
@@ -443,6 +529,11 @@ export class Engine {
         report,
       };
       this.repos.assignments.save(updated);
+      this.emit(
+        "assignment.failed",
+        { assignmentId, ticketId: assignment.ticketId },
+        { text: report.text, status: report.status },
+      );
     });
   }
 
@@ -458,6 +549,7 @@ export class Engine {
         reason: report.text,
       };
       this.repos.tickets.save(ticket);
+      this.emit("ticket.ended", { ticketId }, { outcome: "dropped", reason: report.text });
     }
   }
 
@@ -490,6 +582,11 @@ export class Engine {
         };
         this.repos.assignments.save(ended);
         recovered++;
+        this.emit(
+          "assignment.recovered",
+          { assignmentId: assignment.id, ticketId: assignment.ticketId },
+          { text: "host interrupted" },
+        );
         const ticket = this.repos.tickets.get(assignment.ticketId);
         if (ticket !== undefined && ticket.state === "open") {
           this.createAssignment(assignment.ticketId);

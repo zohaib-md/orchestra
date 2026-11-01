@@ -3,6 +3,8 @@ import type {
   AssignmentId,
   Decision,
   DecisionId,
+  EventInput,
+  EventRecord,
   Source,
   SourceId,
   Thread,
@@ -24,6 +26,7 @@ export interface TriggerRepository {
   save(trigger: Trigger): void;
   get(id: TriggerId): Trigger | undefined;
   byExternalId(sourceId: SourceId, externalId: string): Trigger | undefined;
+  list(): Trigger[];
   listBySource(sourceId: SourceId): Trigger[];
   listByThread(threadId: ThreadId): Trigger[];
 }
@@ -31,6 +34,7 @@ export interface TriggerRepository {
 export interface ThreadRepository {
   save(thread: Thread): void;
   get(id: ThreadId): Thread | undefined;
+  list(): Thread[];
   listBySource(sourceId: SourceId): Thread[];
 }
 
@@ -78,6 +82,18 @@ export interface SubscriptionRepository {
   openTicketIdsFor(threadIds: ThreadId[]): TicketId[];
 }
 
+/** Append-only write side of the event log. */
+export interface EventSink {
+  append(event: EventInput): void;
+}
+
+/** Append-only event log, written by the Engine and read by the dashboard. */
+export interface EventRepository extends EventSink {
+  /** All events in ascending order; with `limit`, the latest `limit`. */
+  list(limit?: number): EventRecord[];
+  byTicket(ticketId: TicketId): EventRecord[];
+}
+
 /**
  * The domain-facing contract for persistent state. The Store implements it;
  * the Engine depends only on this interface, never on SQLite.
@@ -91,6 +107,7 @@ export interface Repositories {
   decisions: DecisionRepository;
   evalQueue: EvalQueueRepository;
   subscriptions: SubscriptionRepository;
+  events: EventRepository;
   /** Run `fn` in one transaction; roll back on throw. */
   atomic<T>(fn: () => T): T;
 }

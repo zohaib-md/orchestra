@@ -40,6 +40,7 @@ src/
     ports.ts    Repositories + per-repository contracts
   app/
     store.ts    SQLite implementation of Repositories (node:sqlite)
+    server.ts   read-only JSON API (GET only; never mutates state)
   sources/    Adapters (event streams) → Triggers  [not yet built]
   executor/
     worker.ts   Worker interface + WorkerSignals (pluggable execution mechanism)
@@ -50,7 +51,7 @@ src/
     assessor.ts LlmAssessor (semantic decisions; errors → `unavailable`)
     worker.ts   LlmWorker (task execution; errors → failed assignment)
     deepseek.ts DeepSeekClient (real OpenAI-compatible API client)
-  client/     Vue dashboard (imports types only)  [not yet built]
+dashboard/    Vue 3 + Vite SPA (read-only viewer of the API)
 tests/
 ```
 
@@ -89,7 +90,7 @@ tests/
 | V0.4 SQLite persistence & migration | Done |
 | V0.5 Watchdog (heartbeat/progress/deadline) | Done |
 | V0.6 LLM-powered evaluation & execution | Done |
-| V0.7 Vue monitoring dashboard | Not started |
+| V0.7 Observability dashboard | Done |
 
 ### The pipeline
 
@@ -178,6 +179,29 @@ would need strengthening for multi-process deployment:
   that work. Needs a startup lock or a guarded transition.
 - **Assignment claim** *is* guarded at the database level (conditional
   `UPDATE ... WHERE state = 'pending'`), so duplicate dispatch is already safe.
+
+## Observability (V0.7)
+
+A read-only dashboard that exposes the runtime's state and history without ever
+mutating domain state. The Engine remains the sole writer.
+
+- **Event log** (`events` table, migration v6): append-only records written by
+  the Engine at every meaningful transition — received, evaluated, claimed,
+  heartbeat, progress, completed, delivered, failed, waiting, recovered — plus
+  `llm.call` records written by the LLM adapters (model, latency, outcome,
+  token usage, errors).
+- **Read-only API** (`src/app/server.ts`, `GET` only, port 8787): `/api/overview`,
+  `/api/tickets[/:id]`, `/api/threads[/:id]`, `/api/triggers`, `/api/assignments`,
+  `/api/events`, `/api/failures`, `/api/llm`.
+- **Dashboard** (`dashboard/`, Vue 3 + Vite): overview, thread explorer, ticket
+  details, worker monitor, event timeline, failure inspector, and LLM
+  observability. Reads via `fetch`, never writes.
+
+```sh
+pnpm dev:api         # read-only API on :8787 (ORCHESTRA_DB / PORT env)
+pnpm dev:dashboard   # Vite dev server (proxies /api)
+pnpm build:dashboard # build the SPA to dashboard/dist
+```
 
 ## Commands
 

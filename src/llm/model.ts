@@ -9,11 +9,22 @@ export class ModelError extends Error {
   }
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+}
+
+export interface CompletionResult {
+  text: string;
+  /** Token usage when the provider reports it; null otherwise. */
+  usage: TokenUsage | null;
+}
+
 /**
  * Minimal abstraction over a language model. Real providers (e.g. DeepSeek)
  * and deterministic test fakes both implement this. `complete` must reject
  * with a `ModelError` (or any error) when the model cannot answer.
  */
 export interface ModelClient {
-  complete(prompt: string): Promise<string>;
+  complete(prompt: string): Promise<CompletionResult>;
 }

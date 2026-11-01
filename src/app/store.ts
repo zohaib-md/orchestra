@@ -2,6 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import type {
   Assignment,
   Decision,
+  EventRecord,
   Source,
   Thread,
   Ticket,
@@ -11,6 +12,7 @@ import type {
   AssignmentRepository,
   DecisionRepository,
   EvalQueueRepository,
+  EventRepository,
   Repositories,
   SourceRepository,
   SubscriptionRepository,
@@ -128,6 +130,22 @@ const MIGRATIONS: string[] = [
   `,
   // v5: eval attempt counter for bounded requeue on `unavailable`
   `ALTER TABLE eval_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;`,
+  // v6: append-only event log for observability
+  `
+  CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    ticket_id TEXT,
+    assignment_id TEXT,
+    trigger_id TEXT,
+    thread_id TEXT,
+    data TEXT NOT NULL
+  );
+  CREATE INDEX idx_events_at ON events (at);
+  CREATE INDEX idx_events_kind ON events (kind);
+  CREATE INDEX idx_events_ticket ON events (ticket_id);
+  `,
 ];
 
 export class Store implements Repositories {
@@ -139,6 +157,7 @@ export class Store implements Repositories {
   readonly decisions: DecisionRepository;
   readonly evalQueue: EvalQueueRepository;
   readonly subscriptions: SubscriptionRepository;
+  readonly events: EventRepository;
 
   private readonly db: DatabaseSync;
 
@@ -156,6 +175,7 @@ export class Store implements Repositories {
     this.decisions = this.buildDecisions();
     this.evalQueue = this.buildEvalQueue();
     this.subscriptions = this.buildSubscriptions();
+    this.events = this.buildEvents();
   }
 
   private migrate(): void {
@@ -300,6 +320,9 @@ export class Store implements Repositories {
           .get(sourceId, externalId) as Row | undefined;
         return row === undefined ? undefined : map(row);
       },
+      list() {
+        return (db.prepare("SELECT * FROM triggers ORDER BY created_at").all() as Row[]).map(map);
+      },
       listBySource(sourceId) {
         return (
           db
@@ -345,6 +368,9 @@ export class Store implements Repositories {
           | Row
           | undefined;
         return row === undefined ? undefined : map(row);
+      },
+      list() {
+        return (db.prepare("SELECT * FROM threads").all() as Row[]).map(map);
       },
       listBySource(sourceId) {
         return (
@@ -668,6 +694,55 @@ export class Store implements Repositories {
             )
             .all(...threadIds) as Row[]
         ).map((r) => r["ticket_id"] as string);
+      },
+    };
+  }
+
+  private buildEvents(): EventRepository {
+    const db = this.db;
+    const map = (row: Row): EventRecord => ({
+      id: Number(row["id"]),
+      at: Number(row["at"]),
+      kind: row["kind"] as string,
+      ticketId: row["ticket_id"] as string | null,
+      assignmentId: row["assignment_id"] as string | null,
+      triggerId: row["trigger_id"] as string | null,
+      threadId: row["thread_id"] as string | null,
+      data: parseJson<Record<string, unknown>>(row["data"] as string, {}),
+    });
+    return {
+      append(event) {
+        db.prepare(
+          `INSERT INTO events (at, kind, ticket_id, assignment_id, trigger_id, thread_id, data)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          event.at,
+          event.kind,
+          event.ticketId,
+          event.assignmentId,
+          event.triggerId,
+          event.threadId,
+          toJson(event.data),
+        );
+      },
+      list(limit) {
+        if (limit === undefined) {
+          return (db.prepare("SELECT * FROM events ORDER BY id").all() as Row[]).map(map);
+        }
+        return (
+          db
+            .prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?")
+            .all(limit) as Row[]
+        )
+          .reverse()
+          .map(map);
+      },
+      byTicket(ticketId) {
+        return (
+          db
+            .prepare("SELECT * FROM events WHERE ticket_id = ? ORDER BY id")
+            .all(ticketId) as Row[]
+        ).map(map);
       },
     };
   }

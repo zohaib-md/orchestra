@@ -1,5 +1,5 @@
 import { ModelError } from "./model";
-import type { ModelClient } from "./model";
+import type { CompletionResult, ModelClient } from "./model";
 
 export interface DeepSeekClientOptions {
   apiKey: string;
@@ -9,6 +9,7 @@ export interface DeepSeekClientOptions {
 
 interface DeepSeekResponse {
   choices?: Array<{ message?: { content?: string } }>;
+  usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 /**
@@ -26,7 +27,7 @@ export class DeepSeekClient implements ModelClient {
     this.model = options.model ?? "deepseek-chat";
   }
 
-  async complete(prompt: string): Promise<string> {
+  async complete(prompt: string): Promise<CompletionResult> {
     let response: Response;
     try {
       response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -54,6 +55,13 @@ export class DeepSeekClient implements ModelClient {
     if (typeof content !== "string" || content.trim() === "") {
       throw new ModelError("DeepSeek API returned no content");
     }
-    return content;
+    const usage =
+      data.usage === undefined
+        ? null
+        : {
+            promptTokens: data.usage.prompt_tokens ?? 0,
+            completionTokens: data.usage.completion_tokens ?? 0,
+          };
+    return { text: content, usage };
   }
 }
