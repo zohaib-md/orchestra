@@ -126,6 +126,8 @@ const MIGRATIONS: string[] = [
   ALTER TABLE assignments ADD COLUMN heartbeat_at INTEGER;
   ALTER TABLE assignments ADD COLUMN progress_at INTEGER;
   `,
+  // v5: eval attempt counter for bounded requeue on `unavailable`
+  `ALTER TABLE eval_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export class Store implements Repositories {
@@ -606,10 +608,10 @@ export class Store implements Repositories {
   private buildEvalQueue(): EvalQueueRepository {
     const db = this.db;
     return {
-      enqueue(threadId, triggerId) {
+      enqueue(threadId, triggerId, attempts = 0) {
         db.prepare(
-          "INSERT OR IGNORE INTO eval_queue (thread_id, trigger_id) VALUES (?, ?)",
-        ).run(threadId, triggerId);
+          "INSERT OR IGNORE INTO eval_queue (thread_id, trigger_id, attempts) VALUES (?, ?, ?)",
+        ).run(threadId, triggerId, attempts);
       },
       pendingThreads() {
         return (
@@ -619,15 +621,16 @@ export class Store implements Repositories {
         ).map((r) => r["thread_id"] as string);
       },
       takeThread(threadId) {
-        const ids = (
-          db
-            .prepare(
-              "SELECT trigger_id FROM eval_queue WHERE thread_id = ? ORDER BY rowid",
-            )
-            .all(threadId) as Row[]
-        ).map((r) => r["trigger_id"] as string);
+        const rows = db
+          .prepare(
+            "SELECT trigger_id, attempts FROM eval_queue WHERE thread_id = ? ORDER BY rowid",
+          )
+          .all(threadId) as Row[];
         db.prepare("DELETE FROM eval_queue WHERE thread_id = ?").run(threadId);
-        return ids;
+        return rows.map((r) => ({
+          triggerId: r["trigger_id"] as string,
+          attempts: Number(r["attempts"]),
+        }));
       },
     };
   }

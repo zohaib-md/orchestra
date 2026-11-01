@@ -62,11 +62,11 @@ export interface DecisionRepository {
 
 /** Durable queue of Triggers awaiting evaluation, per Thread. */
 export interface EvalQueueRepository {
-  enqueue(threadId: ThreadId, triggerId: TriggerId): void;
+  enqueue(threadId: ThreadId, triggerId: TriggerId, attempts?: number): void;
   /** Distinct threads that have queued triggers. */
   pendingThreads(): ThreadId[];
   /** Take and remove all queued triggers for a thread, in insertion order. */
-  takeThread(threadId: ThreadId): TriggerId[];
+  takeThread(threadId: ThreadId): { triggerId: TriggerId; attempts: number }[];
 }
 
 /** Many-to-many relation between Tickets and Threads. */

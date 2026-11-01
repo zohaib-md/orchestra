@@ -43,9 +43,9 @@ function setup(clock: { now: number }, maxRetries = 0) {
   return { store, engine, watchdog };
 }
 
-function seed(engine: Engine, count: number): void {
+async function seed(engine: Engine, count: number): Promise<void> {
   for (const input of makeInputs(count)) engine.receive(input);
-  engine.evaluateDue();
+  await engine.evaluateDue();
 }
 
 function readyResult(): WorkerResult {
@@ -115,10 +115,10 @@ describe("classify", () => {
 });
 
 describe("watchdog", () => {
-  it("recovers a worker with no heartbeat (crashed)", () => {
+  it("recovers a worker with no heartbeat (crashed)", async () => {
     const clock = { now: 0 };
     const { store, engine, watchdog } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
     const a = store.assignments.list("pending")[0]!;
     engine.claim(a.id);
 
@@ -130,10 +130,10 @@ describe("watchdog", () => {
     expect(store.assignments.get(a.id)?.report?.text).toBe("no heartbeat");
   });
 
-  it("detects a live worker that is not progressing (stalled)", () => {
+  it("detects a live worker that is not progressing (stalled)", async () => {
     const clock = { now: 0 };
     const { store, engine, watchdog } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
     const a = store.assignments.list("pending")[0]!;
     engine.claim(a.id); // startedAt = heartbeatAt = progressAt = 0
 
@@ -148,7 +148,7 @@ describe("watchdog", () => {
   it("never recovers a waiting or blocked assignment", async () => {
     const clock = { now: 0 };
     const { store, engine, watchdog } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
 
     const runtime = new WorkerRuntime(engine, {
       worker: {
@@ -175,10 +175,10 @@ describe("watchdog", () => {
     expect(store.assignments.list("waiting")).toHaveLength(1);
   });
 
-  it("recovers a worker that exceeded its deadline", () => {
+  it("recovers a worker that exceeded its deadline", async () => {
     const clock = { now: 0 };
     const { store, engine, watchdog } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
     const a = store.assignments.list("pending")[0]!;
     engine.claim(a.id);
 
@@ -189,10 +189,10 @@ describe("watchdog", () => {
     );
   });
 
-  it("retries delivery of a completed result without re-executing", () => {
+  it("retries delivery of a completed result without re-executing", async () => {
     const clock = { now: 0 };
     const { store, engine } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
     const a = store.assignments.list("pending")[0]!;
 
     engine.claim(a.id);
@@ -209,10 +209,10 @@ describe("watchdog", () => {
     expect(store.assignments.listByTicket(a.ticketId)).toHaveLength(1);
   });
 
-  it("does not recover the same assignment twice", () => {
+  it("does not recover the same assignment twice", async () => {
     const clock = { now: 0 };
     const { store, engine, watchdog } = setup(clock);
-    seed(engine, 1);
+    await seed(engine, 1);
     const a = store.assignments.list("pending")[0]!;
     engine.claim(a.id);
 
@@ -223,7 +223,7 @@ describe("watchdog", () => {
 });
 
 describe("restart with persisted heartbeat state", () => {
-  it("persists heartbeat/progress and recovers on restart", () => {
+  it("persists heartbeat/progress and recovers on restart", async () => {
     const clock = { now: 0 };
     const path = tempStorePath();
 
@@ -232,7 +232,7 @@ describe("restart with persisted heartbeat state", () => {
       policy: () => makePolicy(),
       now: () => clock.now,
     });
-    seed(engineA, 1);
+    await seed(engineA, 1);
     const a = storeA.assignments.list("pending")[0]!;
     engineA.claim(a.id);
     clock.now = 40;

@@ -45,6 +45,11 @@ src/
     worker.ts   Worker interface + WorkerSignals (pluggable execution mechanism)
     runtime.ts  WorkerRuntime (dispatch, concurrency, retry, recovery)
     watchdog.ts Watchdog (heartbeat/progress/deadline stall detection)
+  llm/         LLM adapters behind the Assessor and Worker interfaces
+    model.ts    ModelClient interface + ModelError
+    assessor.ts LlmAssessor (semantic decisions; errors → `unavailable`)
+    worker.ts   LlmWorker (task execution; errors → failed assignment)
+    deepseek.ts DeepSeekClient (real OpenAI-compatible API client)
   client/     Vue dashboard (imports types only)  [not yet built]
 tests/
 ```
@@ -83,7 +88,7 @@ tests/
 | V0.3 Concurrent isolated Workers + retry/recovery | Done |
 | V0.4 SQLite persistence & migration | Done |
 | V0.5 Watchdog (heartbeat/progress/deadline) | Done |
-| V0.6 LLM-powered evaluation & execution | Not started |
+| V0.6 LLM-powered evaluation & execution | Done |
 | V0.7 Vue monitoring dashboard | Not started |
 
 ### The pipeline
@@ -128,6 +133,30 @@ pending ──claim──▶ running ──complete──▶ completed ──del
   re-executing the work.
 - **Restart** (`WorkerRuntime.start`) runs `recoverInterrupted()` (running →
   failed "host interrupted" + replacement) and `deliverCompleted()`.
+
+### The LLM boundary (V0.6)
+
+The LLM is an adapter, not the core. Deterministic policy enforcement,
+authorization, state transitions, and recovery stay outside the model:
+
+| Concern | Owner |
+|---------|-------|
+| Authorization (who may ask) | `gate()` — deterministic, always |
+| Semantic evaluation (accept/ignore/scope) | `Assessor` — pluggable (`LlmAssessor`) |
+| Task execution | `Worker` — pluggable (`LlmWorker`) |
+| State transitions & recovery | `Engine` + `Watchdog` — deterministic, always |
+
+- `Assessor.assess` is now **async**; `evaluateDue` is async too. The eval is
+  split into an atomic *take*, an await outside any transaction, and an atomic
+  *decide*.
+- A model/parse failure during evaluation returns **`unavailable`**, which the
+  Router requeues (bounded by `MAX_EVAL_ATTEMPTS`) instead of dropping or
+  crashing. An assessor that *throws* is treated the same way.
+- A model failure during execution rejects `LlmWorker.run`, which the Worker
+  Runtime maps to a `failed` assignment and a bounded retry.
+- The real client is `DeepSeekClient` (OpenAI-compatible `chat/completions`);
+  pass the key explicitly (`DEEPSEEK_API_KEY`, see `.env.example`). Tests use a
+  deterministic `FakeModelClient`.
 
 ### Assumptions
 

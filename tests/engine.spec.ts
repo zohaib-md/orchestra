@@ -43,10 +43,10 @@ describe("receive", () => {
 });
 
 describe("evaluateDue", () => {
-  it("accepts an explicit request: ticket, mandate, assignment and subscription", () => {
+  it("accepts an explicit request: ticket, mandate, assignment and subscription", async () => {
     const e = engine();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
 
     const tickets = store.tickets.list();
     expect(tickets).toHaveLength(1);
@@ -67,48 +67,48 @@ describe("evaluateDue", () => {
     expect(decision?.outcome).toBe("accept");
   });
 
-  it("ignores a trigger from an unknown actor", () => {
+  it("ignores a trigger from an unknown actor", async () => {
     const e = engine();
     e.receive(makeInput({ actor: "mallory" }));
-    e.evaluateDue();
+    await e.evaluateDue();
     expect(store.tickets.list()).toHaveLength(0);
     expect(store.decisions.list()[0]?.outcome).toBe("ignore");
   });
 
-  it("accepts a bot candidate only when a rule matches its kind", () => {
+  it("accepts a bot candidate only when a rule matches its kind", async () => {
     const e = engine();
     e.receive(makeInput({ actor: "ci-bot", kind: "issue" }));
-    e.evaluateDue();
+    await e.evaluateDue();
     expect(store.tickets.list()).toHaveLength(1);
     expect(store.tickets.list()[0]?.mandate.strength).toBe("inferred");
   });
 
-  it("ignores a bot candidate with no matching rule", () => {
+  it("ignores a bot candidate with no matching rule", async () => {
     const e = engine();
     e.receive(makeInput({ actor: "ci-bot", kind: "push" }));
-    e.evaluateDue();
+    await e.evaluateDue();
     expect(store.tickets.list()).toHaveLength(0);
   });
 
-  it("records the trigger disposition for audit", () => {
+  it("records the trigger disposition for audit", async () => {
     const e = engine();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
     const trigger = store.triggers.byExternalId(SOURCE, "evt-1");
     expect(trigger?.disposition?.kind).toBe("evaluated");
   });
 });
 
 describe("subscription-aware routing", () => {
-  it("does not create a new ticket for a person's follow-up on a subscribed thread", () => {
+  it("does not create a new ticket for a person's follow-up on a subscribed thread", async () => {
     const e = engine();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
     expect(store.tickets.list()).toHaveLength(1);
 
     // Alice replies on the same thread.
     e.receive(makeInput({ externalId: "evt-2", kind: "comment" }));
-    e.evaluateDue();
+    await e.evaluateDue();
 
     expect(store.tickets.list()).toHaveLength(1);
     const followUp = store.triggers.byExternalId(SOURCE, "evt-2");
@@ -117,40 +117,40 @@ describe("subscription-aware routing", () => {
     expect(store.evalQueue.pendingThreads()).toHaveLength(0);
   });
 
-  it("still evaluates a bot message on a subscribed thread", () => {
+  it("still evaluates a bot message on a subscribed thread", async () => {
     const e = engine();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
 
     e.receive(makeInput({ externalId: "evt-2", actor: "ci-bot", kind: "push" }));
     expect(store.evalQueue.pendingThreads()).toContain("thread-1");
   });
 });
 
-describe("transactional consistency", () => {
-  it("rolls back the whole eval when the assessor throws", () => {
+describe("assessor failure", () => {
+  it("treats a thrown assessor as unavailable and requeues the batch", async () => {
     const throwingAssessor: Assessor = {
-      assess() {
+      async assess() {
         throw new Error("assessor exploded");
       },
     };
     const e = engine({ assessor: throwingAssessor });
     e.receive(makeInput());
-    expect(() => e.evaluateDue()).toThrow("assessor exploded");
+    await e.evaluateDue();
 
-    // Queue retained, nothing written.
-    expect(store.evalQueue.pendingThreads()).toEqual(["thread-1"]);
-    expect(store.decisions.list()).toHaveLength(0);
+    // No crash, no ticket, but an `unavailable` decision was recorded and the
+    // batch was requeued for a fresh eval.
+    expect(store.decisions.list()[0]?.outcome).toBe("unavailable");
     expect(store.tickets.list()).toHaveLength(0);
-    expect(store.triggers.byExternalId(SOURCE, "evt-1")?.disposition).toBeNull();
+    expect(store.evalQueue.pendingThreads()).toEqual(["thread-1"]);
   });
 });
 
 describe("stopTicket", () => {
-  it("ends an open ticket", () => {
+  it("ends an open ticket", async () => {
     const e = engine();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
     const ticketId = store.tickets.list()[0]!.id;
 
     e.stopTicket(ticketId, "no longer needed");
@@ -160,11 +160,11 @@ describe("stopTicket", () => {
     expect(ticket?.end?.reason).toBe("no longer needed");
   });
 
-  it("refuses to stop a missing or already-ended ticket", () => {
+  it("refuses to stop a missing or already-ended ticket", async () => {
     const e = engine();
     expect(() => e.stopTicket("nope")).toThrow();
     e.receive(makeInput());
-    e.evaluateDue();
+    await e.evaluateDue();
     const ticketId = store.tickets.list()[0]!.id;
     e.stopTicket(ticketId);
     expect(() => e.stopTicket(ticketId)).toThrow();

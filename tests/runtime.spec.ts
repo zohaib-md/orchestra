@@ -27,9 +27,9 @@ function setup(path = ":memory:", maxRetries = 0) {
   return { store, engine };
 }
 
-function seed(engine: Engine, count: number): void {
+async function seed(engine: Engine, count: number): Promise<void> {
   for (const input of makeInputs(count)) engine.receive(input);
-  engine.evaluateDue();
+  await engine.evaluateDue();
 }
 
 function okResult(text = "done"): WorkerResult {
@@ -44,7 +44,7 @@ const successWorker: Worker = { async run() { return okResult(); } };
 describe("worker runtime", () => {
   it("runs the full definition-of-done demonstration", async () => {
     const { store, engine } = setup(":memory:", 1);
-    seed(engine, 3);
+    await seed(engine, 3);
 
     // 1. three authorized tickets with pending dispatch intents
     expect(store.tickets.list("open")).toHaveLength(3);
@@ -89,7 +89,7 @@ describe("worker runtime", () => {
 
   it("enforces the concurrency limit", async () => {
     const { store, engine } = setup();
-    seed(engine, 4);
+    await seed(engine, 4);
 
     let inFlight = 0;
     let maxSeen = 0;
@@ -117,7 +117,7 @@ describe("worker runtime", () => {
 
   it("queues work beyond the limit and completes it all", async () => {
     const { store, engine } = setup();
-    seed(engine, 3);
+    await seed(engine, 3);
     const runtime = new WorkerRuntime(engine, {
       worker: successWorker,
       maxWorkers: 1,
@@ -130,7 +130,7 @@ describe("worker runtime", () => {
 
   it("never runs a completed assignment again (no duplicate side effects)", async () => {
     const { store, engine } = setup();
-    seed(engine, 2);
+    await seed(engine, 2);
     let sideEffects = 0;
     const worker: Worker = {
       async run() {
@@ -156,9 +156,9 @@ describe("worker runtime", () => {
     expect(sideEffects).toBe(2);
   });
 
-  it("claims an assignment at most once (duplicate dispatch delivery)", () => {
+  it("claims an assignment at most once (duplicate dispatch delivery)", async () => {
     const { store, engine } = setup();
-    seed(engine, 1);
+    await seed(engine, 1);
     const assignment = store.assignments.list("pending")[0]!;
 
     const claimed = engine.claim(assignment.id);
@@ -171,7 +171,7 @@ describe("worker runtime", () => {
 
   it("records a failed assignment and creates a replacement (retry policy)", async () => {
     const { store, engine } = setup(":memory:", 1);
-    seed(engine, 1);
+    await seed(engine, 1);
     const ticketId = store.tickets.list()[0]!.id;
 
     const runtime = new WorkerRuntime(engine, {
@@ -191,7 +191,7 @@ describe("worker runtime", () => {
 
   it("does not retry beyond the configured limit", async () => {
     const { store, engine } = setup();
-    seed(engine, 1);
+    await seed(engine, 1);
     const ticketId = store.tickets.list()[0]!.id;
 
     const runtime = new WorkerRuntime(engine, {
@@ -208,7 +208,7 @@ describe("persistence and restart", () => {
   it("persists execution state across a reopen", async () => {
     const path = tempStorePath();
     const first = setup(path);
-    seed(first.engine, 2);
+    await seed(first.engine, 2);
 
     const runtime = new WorkerRuntime(first.engine, {
       worker: successWorker,
@@ -235,7 +235,7 @@ describe("persistence and restart", () => {
 
     // First process: claim the assignment with a hanging worker, then die.
     const first = setup(path);
-    seed(first.engine, 1);
+    await seed(first.engine, 1);
     const ticketId = first.store.tickets.list()[0]!.id;
 
     const hangingWorker: Worker = {

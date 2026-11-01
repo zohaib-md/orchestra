@@ -21,6 +21,9 @@ import type {
 
 export type ReceiveResult = "stored" | "duplicate";
 
+/** Bounded requeues of a batch whose assessment returned `unavailable`. */
+const MAX_EVAL_ATTEMPTS = 2;
+
 export interface EngineOptions {
   policy: () => Policy;
   assessor?: Assessor;
@@ -111,18 +114,24 @@ export class Engine {
 
   // ------------------------------------------------------------------- Eval
 
-  /** Evaluate queued triggers, one transaction per thread. Returns threads evaluated. */
-  evaluateDue(): number {
+  /**
+   * Evaluate queued triggers. The semantic assessor is asynchronous, so each
+   * thread's eval is split into a take (atomic), an await outside any
+   * transaction, and a decide (atomic). Returns threads evaluated.
+   */
+  async evaluateDue(): Promise<number> {
     let evaluated = 0;
     for (const threadId of this.repos.evalQueue.pendingThreads()) {
-      if (this.repos.atomic(() => this.evaluateThread(threadId))) evaluated++;
+      if (await this.evaluateThread(threadId)) evaluated++;
     }
     return evaluated;
   }
 
-  private evaluateThread(threadId: ThreadId): boolean {
-    const batchIds = this.repos.evalQueue.takeThread(threadId);
-    if (batchIds.length === 0) return false;
+  private async evaluateThread(threadId: ThreadId): Promise<boolean> {
+    // 1. Take the batch atomically (this is the "claim" of the eval).
+    const batch = this.repos.atomic(() => this.repos.evalQueue.takeThread(threadId));
+    if (batch.length === 0) return false;
+    const batchIds = batch.map((item) => item.triggerId);
 
     const triggers = batchIds
       .map((id) => this.repos.triggers.get(id))
@@ -135,7 +144,7 @@ export class Engine {
       .map((id) => this.repos.tickets.get(id))
       .filter((t): t is Ticket => t !== undefined);
 
-    // Two-stage evaluation: deterministic gate, then the semantic assessor.
+    // 2. Deterministic gate (sync), then the semantic assessor (async).
     let primary: Trigger | undefined;
     let admitted: Extract<GateResult, { admitted: true }> | undefined;
     for (const trigger of triggers) {
@@ -155,48 +164,68 @@ export class Engine {
       outcome = "ignore";
       reasons = [{ code: "not_admitted", values: {} }];
     } else {
-      assessment = this.assessor.assess({
-        trigger: primary,
-        batch: triggers,
-        thread,
-        tickets,
-        policy,
-        gate: admitted,
-      });
+      try {
+        assessment = await this.assessor.assess({
+          trigger: primary,
+          batch: triggers,
+          thread,
+          tickets,
+          policy,
+          gate: admitted,
+        });
+      } catch {
+        // An assessor that throws is treated as transiently unavailable,
+        // never as a crash: the batch is requeued (bounded) below.
+        assessment = {
+          outcome: "unavailable",
+          ruleId: null,
+          scope: "",
+          reasonCode: "assessor_error",
+        };
+      }
       outcome = assessment.outcome;
       reasons = [{ code: assessment.reasonCode, values: {} }];
     }
 
-    const decision: Decision = {
-      id: key("decision", threadId, ...batchIds),
-      triggerIds: batchIds,
-      outcome,
-      strength: admitted?.strength ?? "explicit",
-      reasons,
-      decidedAt: this.now(),
-      decidedBy: "router",
-    };
-    this.repos.decisions.save(decision);
-
-    for (const trigger of triggers) {
-      trigger.disposition = {
-        kind: "evaluated",
-        decisionId: decision.id,
-        at: this.now(),
+    // 3. Decide atomically.
+    return this.repos.atomic(() => {
+      const decision: Decision = {
+        id: key("decision", threadId, ...batchIds),
+        triggerIds: batchIds,
+        outcome,
+        strength: admitted?.strength ?? "explicit",
+        reasons,
+        decidedAt: this.now(),
+        decidedBy: "router",
       };
-      this.repos.triggers.save(trigger);
-    }
+      this.repos.decisions.save(decision);
 
-    if (
-      outcome === "accept" &&
-      primary !== undefined &&
-      admitted !== undefined &&
-      assessment !== undefined
-    ) {
-      this.acceptTicket(primary, batchIds, admitted, assessment, policy.version);
-    }
+      for (const trigger of triggers) {
+        trigger.disposition = {
+          kind: "evaluated",
+          decisionId: decision.id,
+          at: this.now(),
+        };
+        this.repos.triggers.save(trigger);
+      }
 
-    return true;
+      if (
+        outcome === "accept" &&
+        primary !== undefined &&
+        admitted !== undefined &&
+        assessment !== undefined
+      ) {
+        this.acceptTicket(primary, batchIds, admitted, assessment, policy.version);
+      } else if (outcome === "unavailable") {
+        for (const item of batch) {
+          if (item.attempts < MAX_EVAL_ATTEMPTS) {
+            this.repos.evalQueue.enqueue(threadId, item.triggerId, item.attempts + 1);
+          }
+        }
+      }
+
+      return true;
+    });
   }
 
   private acceptTicket(
