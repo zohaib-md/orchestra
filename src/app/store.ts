@@ -10,8 +10,10 @@ import type {
 import type {
   AssignmentRepository,
   DecisionRepository,
+  EvalQueueRepository,
   Repositories,
   SourceRepository,
+  SubscriptionRepository,
   ThreadRepository,
   TicketRepository,
   TriggerRepository,
@@ -103,6 +105,22 @@ const MIGRATIONS: string[] = [
   CREATE INDEX idx_tickets_state ON tickets (state);
   CREATE INDEX idx_assignments_ticket ON assignments (ticket_id);
   `,
+  // v2: evaluation queue + ticket-thread subscriptions
+  `
+  CREATE TABLE eval_queue (
+    thread_id TEXT NOT NULL,
+    trigger_id TEXT NOT NULL,
+    PRIMARY KEY (thread_id, trigger_id)
+  );
+  CREATE TABLE subscriptions (
+    ticket_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    PRIMARY KEY (ticket_id, thread_id)
+  );
+  CREATE INDEX idx_subscriptions_thread ON subscriptions (thread_id);
+  `,
+  // v3: artifact references on assignments
+  `ALTER TABLE assignments ADD COLUMN artifacts TEXT NOT NULL DEFAULT '[]';`,
 ];
 
 export class Store implements Repositories {
@@ -112,6 +130,8 @@ export class Store implements Repositories {
   readonly tickets: TicketRepository;
   readonly assignments: AssignmentRepository;
   readonly decisions: DecisionRepository;
+  readonly evalQueue: EvalQueueRepository;
+  readonly subscriptions: SubscriptionRepository;
 
   private readonly db: DatabaseSync;
 
@@ -127,6 +147,8 @@ export class Store implements Repositories {
     this.tickets = this.buildTickets();
     this.assignments = this.buildAssignments();
     this.decisions = this.buildDecisions();
+    this.evalQueue = this.buildEvalQueue();
+    this.subscriptions = this.buildSubscriptions();
   }
 
   private migrate(): void {
@@ -445,6 +467,7 @@ export class Store implements Repositories {
               question: row["report_question"] as string | null,
               at: Number(row["report_at"]),
             },
+      artifacts: parseJson<string[]>(row["artifacts"] as string, []),
     });
     return {
       save(assignment) {
@@ -452,8 +475,8 @@ export class Store implements Repositories {
         db.prepare(
           `INSERT INTO assignments
              (id, ticket_id, worker_id, state, created_at, started_at, ended_at,
-              report_status, report_text, report_question, report_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              report_status, report_text, report_question, report_at, artifacts)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              ticket_id = excluded.ticket_id,
              worker_id = excluded.worker_id,
@@ -464,7 +487,8 @@ export class Store implements Repositories {
              report_status = excluded.report_status,
              report_text = excluded.report_text,
              report_question = excluded.report_question,
-             report_at = excluded.report_at`,
+             report_at = excluded.report_at,
+             artifacts = excluded.artifacts`,
         ).run(
           assignment.id,
           assignment.ticketId,
@@ -477,6 +501,7 @@ export class Store implements Repositories {
           report?.text ?? null,
           report?.question ?? null,
           report?.at ?? null,
+          toJson(assignment.artifacts),
         );
       },
       get(id) {
@@ -485,12 +510,34 @@ export class Store implements Repositories {
         ) as Row | undefined;
         return row === undefined ? undefined : map(row);
       },
+      list(state) {
+        const rows =
+          state === undefined
+            ? (db.prepare("SELECT * FROM assignments").all() as Row[])
+            : (db
+                .prepare("SELECT * FROM assignments WHERE state = ?")
+                .all(state) as Row[]);
+        return rows.map(map);
+      },
       listByTicket(ticketId) {
         return (
           db
             .prepare("SELECT * FROM assignments WHERE ticket_id = ?")
             .all(ticketId) as Row[]
         ).map(map);
+      },
+      claim(id, startedAt) {
+        const result = db
+          .prepare(
+            `UPDATE assignments SET state = 'running', started_at = ?
+             WHERE id = ? AND state = 'pending'`,
+          )
+          .run(startedAt, id);
+        if (Number(result.changes) !== 1) return undefined;
+        const row = db
+          .prepare("SELECT * FROM assignments WHERE id = ?")
+          .get(id) as Row | undefined;
+        return row === undefined ? undefined : map(row);
       },
     };
   }
@@ -537,6 +584,72 @@ export class Store implements Repositories {
       },
       list() {
         return (db.prepare("SELECT * FROM decisions").all() as Row[]).map(map);
+      },
+    };
+  }
+
+  private buildEvalQueue(): EvalQueueRepository {
+    const db = this.db;
+    return {
+      enqueue(threadId, triggerId) {
+        db.prepare(
+          "INSERT OR IGNORE INTO eval_queue (thread_id, trigger_id) VALUES (?, ?)",
+        ).run(threadId, triggerId);
+      },
+      pendingThreads() {
+        return (
+          db
+            .prepare("SELECT DISTINCT thread_id FROM eval_queue")
+            .all() as Row[]
+        ).map((r) => r["thread_id"] as string);
+      },
+      takeThread(threadId) {
+        const ids = (
+          db
+            .prepare(
+              "SELECT trigger_id FROM eval_queue WHERE thread_id = ? ORDER BY rowid",
+            )
+            .all(threadId) as Row[]
+        ).map((r) => r["trigger_id"] as string);
+        db.prepare("DELETE FROM eval_queue WHERE thread_id = ?").run(threadId);
+        return ids;
+      },
+    };
+  }
+
+  private buildSubscriptions(): SubscriptionRepository {
+    const db = this.db;
+    return {
+      subscribe(ticketId, threadId) {
+        db.prepare(
+          "INSERT OR IGNORE INTO subscriptions (ticket_id, thread_id) VALUES (?, ?)",
+        ).run(ticketId, threadId);
+      },
+      unsubscribe(ticketId, threadId) {
+        db.prepare(
+          "DELETE FROM subscriptions WHERE ticket_id = ? AND thread_id = ?",
+        ).run(ticketId, threadId);
+      },
+      threadIdsFor(ticketId) {
+        return (
+          db
+            .prepare("SELECT thread_id FROM subscriptions WHERE ticket_id = ?")
+            .all(ticketId) as Row[]
+        ).map((r) => r["thread_id"] as string);
+      },
+      openTicketIdsFor(threadIds) {
+        if (threadIds.length === 0) return [];
+        const placeholders = threadIds.map(() => "?").join(", ");
+        return (
+          db
+            .prepare(
+              `SELECT DISTINCT s.ticket_id AS ticket_id
+               FROM subscriptions s
+               JOIN tickets t ON t.id = s.ticket_id
+               WHERE s.thread_id IN (${placeholders}) AND t.state = 'open'`,
+            )
+            .all(...threadIds) as Row[]
+        ).map((r) => r["ticket_id"] as string);
       },
     };
   }

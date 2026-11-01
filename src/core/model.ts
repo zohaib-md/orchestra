@@ -131,4 +131,6 @@ export interface Assignment {
   startedAt: number | null;
   endedAt: number | null;
   report: Report | null;
+  /** References to generated artifacts, not the artifacts themselves. */
+  artifacts: string[];
 }

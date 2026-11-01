@@ -43,13 +43,39 @@ export interface TicketRepository {
 export interface AssignmentRepository {
   save(assignment: Assignment): void;
   get(id: AssignmentId): Assignment | undefined;
+  list(state?: Assignment["state"]): Assignment[];
   listByTicket(ticketId: TicketId): Assignment[];
+  /**
+   * Atomically transition pending -> running. Returns the running Assignment,
+   * or undefined if the Assignment was not pending (already claimed or ended).
+   * This is the database-level safeguard against two workers claiming the
+   * same Assignment.
+   */
+  claim(id: AssignmentId, startedAt: number): Assignment | undefined;
 }
 
 export interface DecisionRepository {
   save(decision: Decision): void;
   get(id: DecisionId): Decision | undefined;
   list(): Decision[];
+}
+
+/** Durable queue of Triggers awaiting evaluation, per Thread. */
+export interface EvalQueueRepository {
+  enqueue(threadId: ThreadId, triggerId: TriggerId): void;
+  /** Distinct threads that have queued triggers. */
+  pendingThreads(): ThreadId[];
+  /** Take and remove all queued triggers for a thread, in insertion order. */
+  takeThread(threadId: ThreadId): TriggerId[];
+}
+
+/** Many-to-many relation between Tickets and Threads. */
+export interface SubscriptionRepository {
+  subscribe(ticketId: TicketId, threadId: ThreadId): void;
+  unsubscribe(ticketId: TicketId, threadId: ThreadId): void;
+  threadIdsFor(ticketId: TicketId): ThreadId[];
+  /** Distinct ids of open Tickets subscribed to any of the given threads. */
+  openTicketIdsFor(threadIds: ThreadId[]): TicketId[];
 }
 
 /**
@@ -63,6 +89,8 @@ export interface Repositories {
   tickets: TicketRepository;
   assignments: AssignmentRepository;
   decisions: DecisionRepository;
+  evalQueue: EvalQueueRepository;
+  subscriptions: SubscriptionRepository;
   /** Run `fn` in one transaction; roll back on throw. */
   atomic<T>(fn: () => T): T;
 }

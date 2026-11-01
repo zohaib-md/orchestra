@@ -30,10 +30,21 @@ Clean-onion layout. Rules live in the core; adapters translate the outside world
 ```
 src/
   core/       Pure domain logic — zero I/O, imports nothing from app/sources
-  app/        Services: Router, Store, Effects, Outbox, scheduler
-  sources/    Adapters (event streams) → Triggers
-  executor/   Worker session + directory management
-  client/     Vue dashboard (imports types only)
+    model.ts    domain types
+    ids.ts      deterministic ids (key)
+    errors.ts   UserError + fixed refusal codes
+    trigger.ts  canonical Trigger normalization (TriggerInput)
+    policy.ts   Policy + deterministic admission gate
+    assessor.ts pluggable semantic evaluator (deterministic default)
+    engine.ts   the Router (single writer of domain state)
+    ports.ts    Repositories + per-repository contracts
+  app/
+    store.ts    SQLite implementation of Repositories (node:sqlite)
+  sources/    Adapters (event streams) → Triggers  [not yet built]
+  executor/
+    worker.ts   Worker interface (pluggable execution mechanism)
+    runtime.ts  WorkerRuntime (dispatch, concurrency, retry, recovery)
+  client/     Vue dashboard (imports types only)  [not yet built]
 tests/
 ```
 
@@ -61,6 +72,47 @@ tests/
 | Assignment | A ticket bound to one worker instance |
 | Executor   | The worker session + its directory |
 | Channel    | The write side: where replies go |
+
+## Implementation status
+
+| Milestone | Status |
+|-----------|--------|
+| V0.1 Event ingestion + deterministic routing | Done |
+| V0.2 Tickets & Assignments (dispatch intents) | Done |
+| V0.3 Concurrent isolated Workers + retry/recovery | Done |
+| V0.4 SQLite persistence & migration | Done |
+| V0.5 Watchdog (stall detection) | Not started |
+| V0.6 LLM-powered evaluation & execution | Not started |
+| V0.7 Vue monitoring dashboard | Not started |
+
+### The pipeline
+
+```
+TriggerInput ──receive──▶ Trigger (deduped) ──fan-out──▶ subscribed Tickets
+                              │ (else queued)
+                              ▼
+                      evaluateDue: gate (deterministic) ─▶ assessor (pluggable)
+                              │ accept
+                              ▼
+                        Ticket + Mandate + pending Assignment (dispatch intent)
+                              │
+                              ▼
+                 WorkerRuntime: claim ─▶ run Worker ─▶ report (retry on failure)
+```
+
+### Race conditions & known limitations
+
+The design targets a **single process**. The following are safe in-process but
+would need strengthening for multi-process deployment:
+
+- **Eval queue**: `evaluateDue` reads pending threads, then `takeThread`s each
+  in its own transaction. Two processes could take the same batch. A per-thread
+  claim (like the assignment `claim` guard) would close this.
+- **Recovery**: `recoverInterrupted` marks `running` assignments interrupted and
+  creates replacements; two simultaneously-restarting processes could double
+  that work. Needs a startup lock or a guarded transition.
+- **Assignment claim** *is* guarded at the database level (conditional
+  `UPDATE ... WHERE state = 'pending'`), so duplicate dispatch is already safe.
 
 ## Commands
 

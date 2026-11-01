@@ -84,6 +84,7 @@ function assignment(overrides: Partial<Assignment> = {}): Assignment {
     startedAt: null,
     endedAt: null,
     report: null,
+    artifacts: [],
     ...overrides,
   };
 }
